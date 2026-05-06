@@ -58,7 +58,7 @@ def _messages_to_text(messages):
     return ''.join(parts)
 
 
-def _build_backend_request_passthrough(messages, max_tokens, temperature, top_p, stream):
+def _build_backend_request_passthrough(messages, max_tokens, temperature, top_p, stream, extra=None):
     """Build a passthrough request — send messages directly to backend's chat endpoint."""
     if BACKEND_TYPE == 'vllm':
         body = {
@@ -69,6 +69,11 @@ def _build_backend_request_passthrough(messages, max_tokens, temperature, top_p,
             'top_p': top_p,
             'stream': stream,
         }
+        if extra:
+            for k in ('n', 'stop', 'frequency_penalty', 'presence_penalty',
+                       'logprobs', 'top_logprobs', 'response_format'):
+                if k in extra:
+                    body[k] = extra[k]
         url = f'{BACKEND_URL}/v1/chat/completions'
     else:
         text = _messages_to_text(messages)
@@ -185,8 +190,11 @@ async def chat_completions(request: Request):
     budget = MAX_CONTEXT - CONTEXT_MARGIN - max_tokens
 
     if total_tokens <= budget:
+        extra = {k: body[k] for k in ('n', 'stop', 'frequency_penalty', 'presence_penalty',
+                                       'logprobs', 'top_logprobs', 'response_format')
+                 if k in body}
         url, backend_body = _build_backend_request_passthrough(
-            messages, max_tokens, temperature, top_p, stream)
+            messages, max_tokens, temperature, top_p, stream, extra)
         async with httpx.AsyncClient(timeout=900.0) as client:
             if stream:
                 return await _handle_stream_passthrough(client, url, backend_body)
@@ -264,9 +272,17 @@ async def _handle_stream_passthrough(client, url, backend_body):
 async def _handle_sync_passthrough(client, url, backend_body):
     resp = await client.post(url, json=backend_body)
     result = resp.json()
-    if BACKEND_TYPE != 'vllm':
+    if BACKEND_TYPE == 'vllm':
+        for choice in result.get('choices', []):
+            msg = choice.get('message', {})
+            if msg.get('content') and '</think>' in msg['content']:
+                msg['content'] = re.sub(
+                    r'^.*?</think>\s*', '', msg['content'], flags=re.DOTALL).strip()
+        result['model'] = MODEL_NAME
+        return result
+    else:
         text = result.get('content', '')
-        text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
+        text = re.sub(r'^.*?</think>\s*', '', text, flags=re.DOTALL).strip() if '</think>' in text else text
         usage = {
             'prompt_tokens': result.get('tokens_evaluated', 0),
             'completion_tokens': result.get('tokens_predicted', 0),
@@ -282,7 +298,6 @@ async def _handle_sync_passthrough(client, url, backend_body):
                         'finish_reason': 'stop'}],
             'usage': usage,
         }
-    return result
 
 
 # --- MegaContext handlers (overflow path) ---
@@ -351,7 +366,7 @@ async def _handle_sync_mega(client, url, backend_body, stats):
             'total_tokens': result.get('tokens_evaluated', 0) + result.get('tokens_predicted', 0),
         }
 
-    text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
+    text = re.sub(r'^.*?</think>\s*', '', text, flags=re.DOTALL).strip() if '</think>' in text else text
 
     return {
         'id': f'chatcmpl-{int(time.time())}',
