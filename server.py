@@ -58,6 +58,44 @@ def _messages_to_text(messages):
     return ''.join(parts)
 
 
+QUERY_TAIL_CHARS = 4000
+
+def _split_user_message(text):
+    """Split a large user message into (query, context_to_index).
+
+    Tries semantic boundaries first (common prompt markers), then falls back
+    to keeping the last QUERY_TAIL_CHARS as the query.
+    """
+    markers = [
+        '\nPlease first localize',
+        '\nIMPORTANT:',
+        '\nRULES:',
+        '\n--- END FILE ---',
+        '\n</code>',
+        '\n```\n\n',
+    ]
+    best_split = -1
+    for marker in markers:
+        idx = text.rfind(marker)
+        if idx > 0:
+            split_at = idx + len(marker)
+            if split_at < len(text) - 100:
+                best_split = split_at
+                break
+
+    if best_split > 0:
+        context = text[:best_split]
+        query = text[best_split:].strip()
+        if not query:
+            query = text[-QUERY_TAIL_CHARS:]
+            context = text[:-QUERY_TAIL_CHARS]
+    else:
+        query = text[-QUERY_TAIL_CHARS:]
+        context = text[:-QUERY_TAIL_CHARS]
+
+    return query, context
+
+
 def _build_backend_request_passthrough(messages, max_tokens, temperature, top_p, stream, extra=None):
     """Build a passthrough request — send messages directly to backend's chat endpoint."""
     if BACKEND_TYPE == 'vllm':
@@ -226,6 +264,13 @@ async def chat_completions(request: Request):
     if history_msgs:
         history_text = _messages_to_text(history_msgs)
         await asyncio.to_thread(mega_ctx.add_document, history_text)
+    elif last_user:
+        last_user_tokens = await asyncio.to_thread(_count_tokens, last_user)
+        if last_user_tokens > budget:
+            query_text, context_text = _split_user_message(last_user)
+            if context_text:
+                await asyncio.to_thread(mega_ctx.add_document, context_text)
+            last_user = query_text
 
     retrieved_tokens = await asyncio.to_thread(mega_ctx.build_prompt, last_user)
 
