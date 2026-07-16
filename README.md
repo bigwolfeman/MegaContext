@@ -2,6 +2,8 @@
 
 Extend any LLM to **million-token contexts** with zero training. Drop-in OpenAI-compatible proxy — point your coding tools at it and context overflow is handled automatically.
 
+This is brittle. Currently the router performs best on NIH like tasks, and poorly on tasks where matching is purely semantic and not word matching.
+
 ## How It Works
 
 MegaContext sits between your client and any inference backend (vLLM, llama.cpp). When a conversation fits in the backend's context window, requests pass through unchanged. When it overflows, MegaContext automatically:
